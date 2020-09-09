@@ -101,8 +101,8 @@ withCEnvironment envir act =
 
 createProcess_Internal
     :: String
-    -> CreateProcess
-    -> IO ProcRetHandles
+    -> CreateProcess i o e
+    -> IO (ProcRetHandles i o e)
 createProcess_Internal fun
                    CreateProcess{ cmdspec = cmdsp,
                                   cwd = mb_cwd,

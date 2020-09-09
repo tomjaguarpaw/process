@@ -1,5 +1,9 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE StandaloneDeriving #-}
+
 module System.Process.Common
     ( CreateProcess (..)
     , CmdSpec (..)
@@ -33,6 +37,10 @@ module System.Process.Common
     , mbHANDLE
     , mbPipeHANDLE
 #endif
+    , MaybeT(..)
+    , Maybe_(..)
+    , fromJust_
+    , maybe_
     ) where
 
 import Control.Concurrent
@@ -81,13 +89,13 @@ type UserID = CGid
 type PHANDLE = CPid
 #endif
 
-data CreateProcess = CreateProcess{
+data CreateProcess i o e = CreateProcess{
   cmdspec      :: CmdSpec,                 -- ^ Executable & arguments, or shell command.  If 'cwd' is 'Nothing', relative paths are resolved with respect to the current working directory.  If 'cwd' is provided, it is implementation-dependent whether relative paths are resolved with respect to 'cwd' or the current working directory, so absolute paths should be used to ensure portability.
   cwd          :: Maybe FilePath,          -- ^ Optional path to the working directory for the new process
   env          :: Maybe [(String,String)], -- ^ Optional environment (otherwise inherit from the current process)
-  std_in       :: StdStream,               -- ^ How to determine stdin
-  std_out      :: StdStream,               -- ^ How to determine stdout
-  std_err      :: StdStream,               -- ^ How to determine stderr
+  std_in       :: StdStream i,             -- ^ How to determine stdin
+  std_out      :: StdStream o,             -- ^ How to determine stdout
+  std_err      :: StdStream e,             -- ^ How to determine stderr
   close_fds    :: Bool,                    -- ^ Close all file descriptors except stdin, stdout and stderr in the new process (on Windows, only works if std_in, std_out, and std_err are all Inherit). This implementation will call close an every fd from 3 to the maximum of open files, which can be slow for high maximum of open files.
   create_group :: Bool,                    -- ^ Create a new process group
   delegate_ctlc:: Bool,                    -- ^ Delegate control-C handling. Use this for interactive console processes to let them handle control-C themselves (see below for details).
@@ -122,13 +130,16 @@ data CreateProcess = CreateProcess{
                                            --   Default: @False@
                                            --
                                            --   @since 1.5.0.0
- } deriving (Show, Eq)
+ }
+
+deriving instance Show (CreateProcess i o e)
+deriving instance Eq (CreateProcess i o e)
 
 -- | contains the handles returned by a call to createProcess_Internal
-data ProcRetHandles
-  = ProcRetHandles { hStdInput      :: Maybe Handle
-                   , hStdOutput     :: Maybe Handle
-                   , hStdError      :: Maybe Handle
+data ProcRetHandles i o e
+  = ProcRetHandles { hStdInput      :: Maybe_ i Handle
+                   , hStdOutput     :: Maybe_ o Handle
+                   , hStdError      :: Maybe_ e Handle
                    , procHandle     :: ProcessHandle
                    }
 
@@ -166,25 +177,44 @@ data CmdSpec
 instance IsString CmdSpec where
   fromString = ShellCommand
 
-data StdStream
-  = Inherit                  -- ^ Inherit Handle from parent
-  | UseHandle Handle         -- ^ Use the supplied Handle
-  | CreatePipe               -- ^ Create a new pipe.  The returned
-                             -- @Handle@ will use the default encoding
-                             -- and newline translation mode (just
-                             -- like @Handle@s created by @openFile@).
-  | NoStream                 -- ^ Close the stream's file descriptor without
-                             -- passing a Handle. On POSIX systems this may
-                             -- lead to strange behavior in the child process
-                             -- because attempting to read or write after the
-                             -- file has been closed throws an error. This
-                             -- should only be used with child processes that
-                             -- don't use the file descriptor at all. If you
-                             -- wish to ignore the child process's output you
-                             -- should either create a pipe and drain it
-                             -- manually or pass a @Handle@ that writes to
-                             -- @\/dev\/null@.
-  deriving (Eq, Show)
+data MaybeT = NothingT | JustT
+
+data Maybe_ t a where
+  Just_    :: a -> Maybe_ 'JustT a
+  Nothing_ :: Maybe_ 'NothingT a
+
+fromJust_ :: Maybe_ 'JustT a -> a
+fromJust_ (Just_ a) = a
+
+maybe_ :: b -> (a -> b) -> Maybe_ t a -> b
+maybe_ _ f (Just_ a) = f a
+maybe_ b _ Nothing_ = b
+
+data StdStream a where
+  Inherit :: StdStream 'NothingT
+    -- ^ Inherit Handle from parent
+  UseHandle :: Handle -> StdStream 'NothingT
+    -- ^ Use the supplied Handle
+  CreatePipe :: StdStream 'JustT
+    -- ^ Create a new pipe.  The returned
+    -- @Handle@ will use the default encoding
+    -- and newline translation mode (just
+    -- like @Handle@s created by @openFile@).
+  NoStream :: StdStream 'NothingT
+    -- ^ Close the stream's file descriptor without
+    -- passing a Handle. On POSIX systems this may
+    -- lead to strange behavior in the child process
+    -- because attempting to read or write after the
+    -- file has been closed throws an error. This
+    -- should only be used with child processes that
+    -- don't use the file descriptor at all. If you
+    -- wish to ignore the child process's output you
+    -- should either create a pipe and drain it
+    -- manually or pass a @Handle@ that writes to
+    -- @\/dev\/null@.
+
+deriving instance Show (StdStream a)
+deriving instance Eq (StdStream a)
 
 -- ----------------------------------------------------------------------------
 -- ProcessHandle type
@@ -237,7 +267,7 @@ fd_stdin  = 0
 fd_stdout = 1
 fd_stderr = 2
 
-mbFd :: String -> FD -> StdStream -> IO FD
+mbFd :: String -> FD -> StdStream f -> IO FD
 mbFd _   _std CreatePipe      = return (-1)
 mbFd _fun std Inherit         = return std
 mbFd _fn _std NoStream        = return (-2)
@@ -254,11 +284,11 @@ mbFd fun _std (UseHandle hdl) =
                       "createProcess" (Just hdl) Nothing
                    `ioeSetErrorString` "handle is not a file descriptor")
 
-mbPipe :: StdStream -> Ptr FD -> IOMode -> IO (Maybe Handle)
-mbPipe CreatePipe pfd  mode = fmap Just (pfdToHandle pfd mode)
-mbPipe Inherit    _    _ = return Nothing
-mbPipe (UseHandle _) _ _ = return Nothing
-mbPipe NoStream   _    _ = return Nothing
+mbPipe :: StdStream t -> Ptr FD -> IOMode -> IO (Maybe_ t Handle)
+mbPipe CreatePipe pfd  mode = fmap Just_ (pfdToHandle pfd mode)
+mbPipe Inherit    _    _ = return Nothing_
+mbPipe (UseHandle _) _ _ = return Nothing_
+mbPipe NoStream   _    _ = return Nothing_
 
 pfdToHandle :: Ptr FD -> IOMode -> IO Handle
 pfdToHandle pfd mode = do

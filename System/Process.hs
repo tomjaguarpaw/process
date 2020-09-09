@@ -1,4 +1,6 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 #if __GLASGOW_HASKELL__ >= 709
 {-# LANGUAGE Safe #-}
 #else
@@ -74,18 +76,23 @@ module System.Process (
     runInteractiveCommand,
     system,
     rawSystem,
+
+    -- * Type-level 'Maybe'
+    Maybe_(..),
+    fromJust_,
+    maybe_,
     ) where
 
 import Prelude hiding (mapM)
 
 import System.Process.Internals
+import System.Process.Common (MaybeT(..), Maybe_(..), fromJust_, maybe_)
 
 import Control.Concurrent
 import Control.DeepSeq (rnf)
 import Control.Exception (SomeException, mask, allowInterrupt, bracket, try, throwIO)
 import qualified Control.Exception as C
 import Control.Monad
-import Data.Maybe
 import Foreign
 import Foreign.C
 import System.Exit      ( ExitCode(..) )
@@ -118,7 +125,7 @@ type Pid = CPid
 -- representing a raw command with arguments.
 --
 -- See 'RawCommand' for precise semantics of the specified @FilePath@.
-proc :: FilePath -> [String] -> CreateProcess
+proc :: FilePath -> [String] -> CreateProcess 'NothingT 'NothingT 'NothingT
 proc cmd args = CreateProcess { cmdspec = RawCommand cmd args,
                                 cwd = Nothing,
                                 env = Nothing,
@@ -137,7 +144,7 @@ proc cmd args = CreateProcess { cmdspec = RawCommand cmd args,
 
 -- | Construct a 'CreateProcess' record for passing to 'createProcess',
 -- representing a command to be passed to the shell.
-shell :: String -> CreateProcess
+shell :: String -> CreateProcess 'NothingT 'NothingT 'NothingT
 shell str = CreateProcess { cmdspec = ShellCommand str,
                             cwd = Nothing,
                             env = Nothing,
@@ -170,11 +177,11 @@ needed.
 'createProcess' returns @(/mb_stdin_hdl/, /mb_stdout_hdl/, /mb_stderr_hdl/, /ph/)@,
 where
 
- * if @'std_in' == 'CreatePipe'@, then @/mb_stdin_hdl/@ will be @Just /h/@,
+ * if @'std_in' == 'CreatePipe'@, then @/mb_stdin_hdl/@ will be @'Just_' /h/@,
    where @/h/@ is the write end of the pipe connected to the child
    process's @stdin@.
 
- * otherwise, @/mb_stdin_hdl/ == Nothing@
+ * otherwise, @/mb_stdin_hdl/ == 'Nothing_'@
 
 Similarly for @/mb_stdout_hdl/@ and @/mb_stderr_hdl/@.
 
@@ -184,12 +191,12 @@ For example, to execute a simple @ls@ command:
 
 To create a pipe from which to read the output of @ls@:
 
->   (_, Just hout, _, _) <-
+>   (_, Just_ hout, _, _) <-
 >       createProcess (proc "ls" []){ std_out = CreatePipe }
 
 To also set the directory in which to run @ls@:
 
->   (_, Just hout, _, _) <-
+>   (_, Just_ hout, _, _) <-
 >       createProcess (proc "ls" []){ cwd = Just "/home/bob",
 >                                     std_out = CreatePipe }
 
@@ -209,8 +216,8 @@ kill all running sub-processes.  This feature has been available since
 
 -}
 createProcess
-  :: CreateProcess
-  -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+  :: CreateProcess i o e
+  -> IO (Maybe_ i Handle, Maybe_ o Handle, Maybe_ e Handle, ProcessHandle)
 createProcess cp = do
   r <- createProcess_ "createProcess" cp
   maybeCloseStd (std_in  cp)
@@ -218,7 +225,7 @@ createProcess cp = do
   maybeCloseStd (std_err cp)
   return r
  where
-  maybeCloseStd :: StdStream -> IO ()
+  maybeCloseStd :: StdStream f -> IO ()
   maybeCloseStd (UseHandle hdl)
     | hdl /= stdin && hdl /= stdout && hdl /= stderr = hClose hdl
   maybeCloseStd _ = return ()
@@ -238,8 +245,8 @@ createProcess cp = do
 --
 -- @since 1.4.3.0
 withCreateProcess
-  :: CreateProcess
-  -> (Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO a)
+  :: CreateProcess i o e
+  -> (Maybe_ i Handle -> Maybe_ o Handle -> Maybe_ e Handle -> ProcessHandle -> IO a)
   -> IO a
 withCreateProcess c action =
     C.bracket (createProcess c) cleanupProcess
@@ -248,8 +255,8 @@ withCreateProcess c action =
 -- wrapper so we can get exceptions with the appropriate function name.
 withCreateProcess_
   :: String
-  -> CreateProcess
-  -> (Maybe Handle -> Maybe Handle -> Maybe Handle -> ProcessHandle -> IO a)
+  -> CreateProcess i o e
+  -> (Maybe_ i Handle -> Maybe_ o Handle -> Maybe_ e Handle -> ProcessHandle -> IO a)
   -> IO a
 withCreateProcess_ fun c action =
     C.bracketOnError (createProcess_ fun c) cleanupProcess
@@ -261,7 +268,7 @@ withCreateProcess_ fun c action =
 -- handler. It terminates the process, and closes any 'CreatePipe' 'handle's.
 -- 
 -- @since 1.6.4.0
-cleanupProcess :: (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+cleanupProcess :: (Maybe_ i Handle, Maybe_ o Handle, Maybe_ e Handle, ProcessHandle)
                -> IO ()
 cleanupProcess (mb_stdin, mb_stdout, mb_stderr,
                 ph@(ProcessHandle _ delegating_ctlc _)) = do
@@ -269,9 +276,9 @@ cleanupProcess (mb_stdin, mb_stdout, mb_stderr,
     -- Note, it's important that other threads that might be reading/writing
     -- these handles also get killed off, since otherwise they might be holding
     -- the handle lock and prevent us from closing, leading to deadlock.
-    maybe (return ()) (ignoreSigPipe . hClose) mb_stdin
-    maybe (return ()) hClose mb_stdout
-    maybe (return ()) hClose mb_stderr
+    maybe_ (return ()) (ignoreSigPipe . hClose) mb_stdin
+    maybe_ (return ()) hClose mb_stdout
+    maybe_ (return ()) hClose mb_stderr
     -- terminateProcess does not guarantee that it terminates the process.
     -- Indeed on Unix it's SIGTERM, which asks nicely but does not guarantee
     -- that it stops. If it doesn't stop, we don't want to hang, so we wait
@@ -480,7 +487,7 @@ readProcess cmd args = readCreateProcess $ proc cmd args
 -- @since 1.2.3.0
 
 readCreateProcess
-    :: CreateProcess
+    :: CreateProcess i o e
     -> String                   -- ^ standard input
     -> IO String                -- ^ stdout
 readCreateProcess cp input = do
@@ -491,7 +498,7 @@ readCreateProcess cp input = do
     (ex, output) <- withCreateProcess_ "readCreateProcess" cp_opts $
       \mb_inh mb_outh _ ph ->
         case (mb_inh, mb_outh) of
-          (Just inh, Just outh) -> do
+          (Just_ inh, Just_ outh) -> do
 
             -- fork off a thread to start consuming the output
             output  <- hGetContents outh
@@ -510,9 +517,6 @@ readCreateProcess cp input = do
             -- wait on the process
             ex <- waitForProcess ph
             return (ex, output)
-
-          (Nothing,_) -> error "readCreateProcess: Failed to get a stdin handle."
-          (_,Nothing) -> error "readCreateProcess: Failed to get a stdout handle."
 
     case ex of
      ExitSuccess   -> return output
@@ -553,7 +557,7 @@ readProcessWithExitCode cmd args =
 --
 -- @since 1.2.3.0
 readCreateProcessWithExitCode
-    :: CreateProcess
+    :: CreateProcess i o e
     -> String                      -- ^ standard input
     -> IO (ExitCode,String,String) -- ^ exitcode, stdout, stderr
 readCreateProcessWithExitCode cp input = do
@@ -565,7 +569,7 @@ readCreateProcessWithExitCode cp input = do
     withCreateProcess_ "readCreateProcessWithExitCode" cp_opts $
       \mb_inh mb_outh mb_errh ph ->
         case (mb_inh, mb_outh, mb_errh) of
-          (Just inh, Just outh, Just errh) -> do
+          (Just_ inh, Just_ outh, Just_ errh) -> do
 
             out <- hGetContents outh
             err <- hGetContents errh
@@ -590,10 +594,6 @@ readCreateProcessWithExitCode cp input = do
             -- wait on the process
             ex <- waitForProcess ph
             return (ex, out, err)
-
-          (Nothing,_,_) -> error "readCreateProcessWithExitCode: Failed to get a stdin handle."
-          (_,Nothing,_) -> error "readCreateProcessWithExitCode: Failed to get a stdout handle."
-          (_,_,Nothing) -> error "readCreateProcessWithExitCode: Failed to get a stderr handle."
 
 -- | Fork a thread while doing something else, but kill it if there's an
 -- exception.
@@ -919,7 +919,7 @@ runProcess cmd args mb_cwd mb_env mb_stdin mb_stdout mb_stderr = do
     | hdl /= stdin && hdl /= stdout && hdl /= stderr = hClose hdl
   maybeClose _ = return ()
 
-  mbToStd :: Maybe Handle -> StdStream
+  mbToStd :: Maybe Handle -> StdStream 'NothingT
   mbToStd Nothing    = Inherit
   mbToStd (Just hdl) = UseHandle hdl
 
@@ -967,7 +967,7 @@ runInteractiveProcess cmd args mb_cwd mb_env = do
 
 runInteractiveProcess1
   :: String
-  -> CreateProcess
+  -> CreateProcess i o e
   -> IO (Handle,Handle,Handle,ProcessHandle)
 runInteractiveProcess1 fun cmd = do
   (mb_in, mb_out, mb_err, p) <-
@@ -975,7 +975,7 @@ runInteractiveProcess1 fun cmd = do
            cmd{ std_in  = CreatePipe,
                 std_out = CreatePipe,
                 std_err = CreatePipe }
-  return (fromJust mb_in, fromJust mb_out, fromJust mb_err, p)
+  return (fromJust_ mb_in, fromJust_ mb_out, fromJust_ mb_err, p)
 
 
 -- ---------------------------------------------------------------------------

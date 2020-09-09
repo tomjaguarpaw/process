@@ -85,8 +85,8 @@ import System.Process.Posix
 -- @since 1.2.1.0
 createProcess_
   :: String                     -- ^ function name (for error messages)
-  -> CreateProcess
-  -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+  -> CreateProcess i o e
+  -> IO (Maybe_ i Handle, Maybe_ o Handle, Maybe_ e Handle, ProcessHandle)
 createProcess_ msg proc_ = unwrapHandles `fmap` createProcess_Internal msg proc_
 {-# INLINE createProcess_ #-}
 
@@ -151,7 +151,7 @@ translate = translateInternal
 
 -- ---------------------------------------------------------------------------
 -- unwrapHandles
-unwrapHandles :: ProcRetHandles -> (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+unwrapHandles :: ProcRetHandles i o e -> (Maybe_ i Handle, Maybe_ o Handle, Maybe_ e Handle, ProcessHandle)
 unwrapHandles r = (hStdInput r, hStdOutput r, hStdError r, procHandle r)
 
 -- ----------------------------------------------------------------------------
@@ -161,10 +161,10 @@ unwrapHandles r = (hStdInput r, hStdOutput r, hStdError r, procHandle r)
       "Please do not use this anymore, use the ordinary 'System.Process.createProcess'. If you need the SIGINT handling, use delegate_ctlc = True (runGenProcess_ is now just an imperfectly emulated stub that probably duplicates or overrides your own signal handling)." #-}
 runGenProcess_
  :: String                     -- ^ function name (for error messages)
- -> CreateProcess
+ -> CreateProcess i o e
  -> Maybe CLong                -- ^ handler for SIGINT
  -> Maybe CLong                -- ^ handler for SIGQUIT
- -> IO (Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle)
+ -> IO (Maybe_ i Handle, Maybe_ o Handle, Maybe_ e Handle, ProcessHandle)
 -- On Windows, setting delegate_ctlc has no impact
 runGenProcess_ fun c (Just sig) (Just sig') | isDefaultSignal sig && sig == sig'
                          = createProcess_ fun c { delegate_ctlc = True }
