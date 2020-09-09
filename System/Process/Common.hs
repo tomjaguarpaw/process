@@ -256,7 +256,9 @@ mbFd fun _std (UseHandle hdl) =
 
 mbPipe :: StdStream -> Ptr FD -> IOMode -> IO (Maybe Handle)
 mbPipe CreatePipe pfd  mode = fmap Just (pfdToHandle pfd mode)
-mbPipe _std      _pfd _mode = return Nothing
+mbPipe Inherit    _    _ = return Nothing
+mbPipe (UseHandle _) _ _ = return Nothing
+mbPipe NoStream   _    _ = return Nothing
 
 pfdToHandle :: Ptr FD -> IOMode -> IO Handle
 pfdToHandle pfd mode = do
